@@ -1,4 +1,5 @@
 import { Bell } from 'lucide-react';
+import { getManagerInitials } from '../utils/manager';
 
 function getFormattedDate() {
   return new Date().toLocaleDateString('en-US', {
@@ -14,7 +15,9 @@ function getFormattedDate() {
  * Props:
  *  - title  {string}
  */
-export default function Topbar({ title }) {
+export default function Topbar({ title, manager }) {
+  const initials = getManagerInitials(manager?.name);
+
   return (
     <header className="flex shrink-0 items-center justify-between border-b border-slate-200 bg-white py-3.5 pl-16 pr-5 sm:pr-7 lg:px-8">
       <div className="min-w-0">
@@ -34,12 +37,16 @@ export default function Topbar({ title }) {
           />
         </button>
 
+        <div className="hidden min-w-0 text-right sm:block">
+          <p className="max-w-36 truncate text-xs font-medium text-slate-800">{manager.name}</p>
+          <p className="max-w-36 truncate text-[10px] text-slate-500">{manager.email}</p>
+        </div>
         <div
           className="flex h-9 w-9 cursor-default select-none items-center justify-center rounded-full bg-blue-700 text-[11px] font-semibold text-white ring-2 ring-blue-50"
-          aria-label="Manager account"
-          title="Manager"
+          aria-label={`${manager.name} account`}
+          title={`${manager.name} (${manager.email})`}
         >
-          MG
+          {initials}
         </div>
       </div>
     </header>

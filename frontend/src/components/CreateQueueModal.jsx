@@ -11,23 +11,38 @@ import { X, AlertCircle } from 'lucide-react';
 export default function CreateQueueModal({ isOpen, onClose, onCreate }) {
   const [name, setName] = useState('');
   const [error, setError] = useState('');
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   if (!isOpen) return null;
 
-  function handleSubmit(e) {
+  async function handleSubmit(e) {
     e.preventDefault();
     const trimmed = name.trim();
     if (!trimmed) {
       setError('Queue name is required.');
       return;
     }
-    onCreate(trimmed);
-    setName('');
+    setIsSubmitting(true);
     setError('');
-    onClose();
+    try {
+      await onCreate(trimmed);
+      setName('');
+      setError('');
+      onClose();
+    } catch (requestError) {
+      const message = requestError.response?.data?.message;
+      setError(
+        typeof message === 'string'
+          ? message
+          : 'Unable to create the queue. Please try again.',
+      );
+    } finally {
+      setIsSubmitting(false);
+    }
   }
 
   function handleClose() {
+    if (isSubmitting) return;
     setName('');
     setError('');
     onClose();
@@ -57,8 +72,10 @@ export default function CreateQueueModal({ isOpen, onClose, onCreate }) {
           </div>
           <button
             onClick={handleClose}
+            aria-disabled={isSubmitting}
             aria-label="Close modal"
-            className="rounded-md p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700"
+            disabled={isSubmitting}
+            className="rounded-md p-1.5 text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <X size={16} />
           </button>
@@ -81,6 +98,8 @@ export default function CreateQueueModal({ isOpen, onClose, onCreate }) {
                 onChange={(e) => { setName(e.target.value); setError(''); }}
                 placeholder="e.g. Medical Consultation"
                 autoFocus
+                required
+                disabled={isSubmitting}
                 className={`min-h-11 w-full rounded-lg border bg-white px-3.5 text-sm text-slate-900 outline-none transition-colors placeholder:text-slate-400
                   ${error
                     ? 'border-red-400 ring-1 ring-red-300 focus:border-red-400 focus:ring-red-300'
@@ -90,7 +109,7 @@ export default function CreateQueueModal({ isOpen, onClose, onCreate }) {
                 aria-invalid={!!error}
               />
               {error && (
-                <p id="queue-name-error" className="mt-1.5 flex items-center gap-1 text-xs font-medium text-red-600">
+                <p id="queue-name-error" className="mt-1.5 flex items-center gap-1 text-xs font-medium text-red-600" role="alert">
                   <AlertCircle size={12} />
                   {error}
                 </p>
@@ -103,15 +122,17 @@ export default function CreateQueueModal({ isOpen, onClose, onCreate }) {
             <button
               type="button"
               onClick={handleClose}
+              disabled={isSubmitting}
               className="min-h-10 rounded-lg border border-slate-300 bg-white px-4 text-xs font-semibold text-slate-700 transition-colors hover:border-slate-400 hover:bg-slate-50"
             >
               Cancel
             </button>
             <button
               type="submit"
-              className="min-h-10 rounded-lg bg-blue-600 px-4 text-xs font-semibold text-white transition-colors hover:bg-blue-700 active:bg-blue-800"
+              disabled={isSubmitting}
+              className="min-h-10 min-w-32 rounded-lg bg-blue-600 px-4 text-xs font-semibold text-white transition-colors hover:bg-blue-700 active:bg-blue-800 disabled:cursor-not-allowed disabled:opacity-60"
             >
-              Create Queue
+              {isSubmitting ? 'Creating…' : 'Create Queue'}
             </button>
           </div>
         </form>

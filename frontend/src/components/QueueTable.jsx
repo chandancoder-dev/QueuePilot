@@ -1,4 +1,4 @@
-import { ExternalLink } from 'lucide-react';
+import { AlertCircle, ExternalLink, RefreshCw } from 'lucide-react';
 
 /** Status badge */
 function StatusBadge({ status }) {
@@ -21,20 +21,58 @@ function StatusBadge({ status }) {
 }
 
 /**
- * QueueTable – responsive table of active queues.
+ * QueueTable – responsive table of queues.
  * Props:
  *  - queues  {Array}
  */
-export default function QueueTable({ queues, onViewDetails }) {
+export default function QueueTable({
+  queues,
+  onViewDetails,
+  isLoading = false,
+  error = '',
+  onRetry,
+  emptyMessage = 'No queues yet. Create your first queue above.',
+}) {
+  if (isLoading) {
+    return (
+      <div className="flex min-h-40 items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white text-sm text-slate-500">
+        <span className="h-4 w-4 animate-spin rounded-full border-2 border-blue-600 border-t-transparent" aria-hidden="true" />
+        Loading queues…
+      </div>
+    );
+  }
+
   return (
-    <div className="min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
+    <div>
+      {error && (
+        <div
+          className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-3.5 py-3 text-sm text-red-700"
+          role="alert"
+        >
+          <span className="flex items-center gap-2">
+            <AlertCircle size={16} aria-hidden="true" />
+            {error}
+          </span>
+          {onRetry && (
+            <button
+              type="button"
+              onClick={onRetry}
+              className="inline-flex min-h-8 items-center gap-1.5 rounded-md px-2 text-xs font-semibold text-red-700 hover:bg-red-100"
+            >
+              <RefreshCw size={13} />
+              Retry
+            </button>
+          )}
+        </div>
+      )}
+      <div className="min-w-0 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
       <div className="divide-y divide-slate-100 md:hidden">
         {queues.map((queue) => (
           <article key={queue.id} className="px-4 py-4">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <h3 className="truncate text-sm font-semibold text-slate-900">{queue.name}</h3>
-                <p className="mt-1 font-mono text-[11px] text-slate-500">{queue.id}</p>
+                <p className="mt-1 font-mono text-[11px] text-slate-500">{queue.queueId}</p>
               </div>
               <StatusBadge status={queue.status} />
             </div>
@@ -44,8 +82,8 @@ export default function QueueTable({ queues, onViewDetails }) {
                 <p className="mt-1 text-sm font-semibold text-slate-800">{queue.waiting} <span className="text-xs font-normal text-slate-500">people</span></p>
               </div>
               <div>
-                <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Serving token</p>
-                <p className="mt-1 font-mono text-xs font-medium text-slate-800">{queue.servingToken}</p>
+                <p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Serving</p>
+                <p className="mt-1 font-mono text-xs font-medium text-slate-800">{queue.servingCount}</p>
               </div>
             </div>
             <button
@@ -60,13 +98,13 @@ export default function QueueTable({ queues, onViewDetails }) {
         ))}
         {queues.length === 0 && (
           <div className="px-4 py-10 text-center text-sm text-slate-500">
-            No queues yet. Create your first queue above.
+            {emptyMessage}
           </div>
         )}
       </div>
 
       <div className="hidden max-w-full overflow-x-auto md:block">
-        <table className="w-full min-w-[800px] text-sm" aria-label="Active queues">
+        <table className="w-full min-w-[800px] text-sm" aria-label="Queues">
           <thead>
             <tr className="border-b border-slate-200 bg-slate-50/80">
               <th scope="col" className="whitespace-nowrap px-5 py-3.5 text-left text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">
@@ -79,13 +117,13 @@ export default function QueueTable({ queues, onViewDetails }) {
                 Waiting
               </th>
               <th scope="col" className="whitespace-nowrap px-5 py-3.5 text-left text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">
-                Serving Token
+                Serving
               </th>
               <th scope="col" className="whitespace-nowrap px-5 py-3.5 text-left text-[10px] font-semibold uppercase tracking-[0.12em] text-slate-500">
                 Status
               </th>
               <th scope="col" className="px-5 py-3.5">
-                <span className="sr-only">Actions</span>
+                Actions
               </th>
             </tr>
           </thead>
@@ -99,7 +137,7 @@ export default function QueueTable({ queues, onViewDetails }) {
                   {queue.name}
                 </td>
                 <td className="whitespace-nowrap px-5 py-4 font-mono text-xs text-slate-500">
-                  {queue.id}
+                  {queue.queueId}
                 </td>
                 <td className="whitespace-nowrap px-5 py-4">
                   <span className="inline-flex items-center gap-1 font-medium text-slate-700">
@@ -109,7 +147,7 @@ export default function QueueTable({ queues, onViewDetails }) {
                 </td>
                 <td className="whitespace-nowrap px-5 py-4">
                   <span className="rounded-md border border-slate-200 bg-slate-50 px-2 py-1 font-mono text-xs font-medium text-slate-700">
-                    {queue.servingToken}
+                    {queue.servingCount}
                   </span>
                 </td>
                 <td className="whitespace-nowrap px-5 py-4">
@@ -130,12 +168,13 @@ export default function QueueTable({ queues, onViewDetails }) {
           {queues.length === 0 && (
             <tr>
               <td colSpan="6" className="py-12 text-center text-sm text-slate-500">
-                No queues yet. Create your first queue above.
+                {emptyMessage}
               </td>
             </tr>
           )}
           </tbody>
         </table>
+      </div>
       </div>
     </div>
   );

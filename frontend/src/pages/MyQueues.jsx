@@ -5,7 +5,14 @@ import QueueTable from '../components/QueueTable';
 
 const filters = ['All', 'Active', 'Paused'];
 
-export default function MyQueues({ queues, onCreateQueue, onViewDetails }) {
+export default function MyQueues({
+  queues,
+  onCreateQueue,
+  onViewDetails,
+  queueLoadStatus,
+  queueLoadError,
+  onRetryQueues,
+}) {
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('All');
   const [modalOpen, setModalOpen] = useState(false);
@@ -17,7 +24,7 @@ export default function MyQueues({ queues, onCreateQueue, onViewDetails }) {
       const matchesQuery =
         !normalizedQuery ||
         queue.name.toLowerCase().includes(normalizedQuery) ||
-        queue.id.toLowerCase().includes(normalizedQuery);
+        queue.queueId.toLowerCase().includes(normalizedQuery);
       return matchesStatus && matchesQuery;
     });
   }, [queues, query, statusFilter]);
@@ -77,7 +84,18 @@ export default function MyQueues({ queues, onCreateQueue, onViewDetails }) {
           </div>
         </div>
 
-        <QueueTable queues={filteredQueues} onViewDetails={onViewDetails} />
+        <QueueTable
+          queues={filteredQueues}
+          onViewDetails={onViewDetails}
+          isLoading={queueLoadStatus === 'loading'}
+          error={queueLoadStatus === 'error' ? queueLoadError : ''}
+          onRetry={onRetryQueues}
+          emptyMessage={
+            queues.length > 0
+              ? 'No queues match your search or status filter.'
+              : 'No queues yet. Create your first queue above.'
+          }
+        />
       </section>
 
       <CreateQueueModal

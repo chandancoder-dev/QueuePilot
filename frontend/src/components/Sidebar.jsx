@@ -1,6 +1,7 @@
 import { useState } from 'react';
-import { X, Menu } from 'lucide-react';
+import { X, Menu, LogOut } from 'lucide-react';
 import { navItems } from '../data/navItems';
+import { getManagerInitials } from '../utils/manager';
 
 /**
  * Sidebar – desktop persistent, mobile slide-over drawer.
@@ -8,8 +9,9 @@ import { navItems } from '../data/navItems';
  *  - activeNav  {string}
  *  - onNavChange {function(id: string)}
  */
-export default function Sidebar({ activeNav, onNavChange }) {
+export default function Sidebar({ activeNav, onNavChange, manager, onLogout }) {
   const [mobileOpen, setMobileOpen] = useState(false);
+  const initials = getManagerInitials(manager?.name);
 
   const renderNavContent = () => (
     <nav className="flex h-full flex-col">
@@ -59,12 +61,21 @@ export default function Sidebar({ activeNav, onNavChange }) {
             className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-slate-700 text-[11px] font-semibold text-slate-100 ring-1 ring-white/10"
             aria-hidden="true"
           >
-            MG
+            {initials}
           </div>
           <div className="min-w-0">
-            <p className="truncate text-xs font-medium text-slate-100">Manager</p>
-            <p className="truncate text-[11px] text-slate-500">manager@queuepilot.io</p>
+            <p className="truncate text-xs font-medium text-slate-100">{manager.name}</p>
+            <p className="truncate text-[11px] text-slate-500">{manager.email}</p>
           </div>
+          <button
+            type="button"
+            onClick={onLogout}
+            className="ml-auto flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-400 transition hover:bg-white/10 hover:text-white"
+            aria-label="Log out"
+            title="Log out"
+          >
+            <LogOut size={16} strokeWidth={1.8} />
+          </button>
         </div>
       </div>
     </nav>

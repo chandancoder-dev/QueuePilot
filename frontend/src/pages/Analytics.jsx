@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   Bar,
   BarChart,
@@ -6,19 +6,27 @@ import {
   Legend,
   Line,
   LineChart,
-  ResponsiveContainer,
   Tooltip,
   XAxis,
   YAxis,
 } from 'recharts';
-import { Ban, Clock3, UserCheck, Users } from 'lucide-react';
+import {
+  Ban,
+  CheckCircle,
+  Clock3,
+  Timer,
+  UserCheck,
+  Users,
+} from 'lucide-react';
+import RecentActivity from '../components/RecentActivity';
 import StatCard from '../components/StatCard';
-
-const rangeOptions = [
-  { value: '7', label: 'Last 7 days' },
-  { value: '30', label: 'Last 30 days' },
-  { value: 'all', label: 'All recorded data' },
-];
+import {
+  fetchDashboardAnalytics,
+  fetchQueuePerformance,
+  fetchQueueTrends,
+  fetchRecentActivity,
+  getAnalyticsErrorMessage,
+} from '../services/analytics';
 
 const chartTooltipStyle = {
   backgroundColor: '#fff',
@@ -27,29 +35,6 @@ const chartTooltipStyle = {
   boxShadow: '0 4px 12px rgba(15, 23, 42, 0.08)',
   fontSize: '12px',
 };
-
-const statMeta = [
-  { icon: UserCheck, accent: 'bg-emerald-50 text-emerald-700' },
-  { icon: Clock3, accent: 'bg-amber-50 text-amber-700' },
-  { icon: Users, accent: 'bg-blue-50 text-blue-700' },
-  { icon: Ban, accent: 'bg-rose-50 text-rose-700' },
-];
-
-function getLocalDateKey(value) {
-  const date = new Date(value);
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-}
-
-function getRangeStart(latestTimestamp, range) {
-  if (range === 'all') return null;
-  const start = new Date(latestTimestamp);
-  start.setHours(0, 0, 0, 0);
-  start.setDate(start.getDate() - (Number(range) - 1));
-  return start;
-}
 
 function ChartCard({ title, description, children, className = '' }) {
   return (
@@ -73,263 +58,431 @@ function EmptyChart({ children }) {
   );
 }
 
-export default function Analytics({ queues, queueLengthHistory, servedEvents }) {
-  const [dateRange, setDateRange] = useState('7');
-  const waitingTokens = queues.flatMap((queue) =>
-    queue.tokens.filter((token) => token.status === 'Waiting'),
-  );
-  const completedTotal = queues.reduce((total, queue) => total + queue.completedCount, 0);
-  const cancelledTotal = queues.reduce(
-    (total, queue) =>
-      total + queue.tokens.filter((token) => token.status === 'Cancelled').length,
-    0,
-  );
-  const averageWait = waitingTokens.length
-    ? Math.round(
-        waitingTokens.reduce((total, token) => total + (token.waitingMinutes ?? 0), 0) /
-          waitingTokens.length,
-      )
-    : null;
+function formatDay(dateKey) {
+  const [year, month, day] = dateKey.split('-').map(Number);
+  return new Date(Date.UTC(year, month - 1, day)).toLocaleDateString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    timeZone: 'UTC',
+  });
+}
 
-  const latestTimestamp =
-    queueLengthHistory[queueLengthHistory.length - 1]?.timestamp ?? new Date().toISOString();
-  const rangeStart = getRangeStart(latestTimestamp, dateRange);
+function formatDuration(value) {
+  return value === null ? 'Unavailable' : `${value.toFixed(1)} min`;
+}
 
-  const queueTrendData = useMemo(
-    () =>
-      queueLengthHistory
-        .filter((item) => !rangeStart || new Date(item.timestamp) >= rangeStart)
-        .map((item) => {
-          const date = new Date(item.timestamp);
-          const label =
-            dateRange === '7'
-              ? date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
-              : date.toLocaleString(undefined, {
-                  month: 'short',
-                  day: 'numeric',
-                  hour: 'numeric',
-                  minute: '2-digit',
-                });
-          return { label, waiting: item.waiting };
-        }),
-    [dateRange, queueLengthHistory, rangeStart],
-  );
+function useChartWidth() {
+  const [container, setContainer] = useState(null);
+  const containerRef = useCallback((element) => {
+    setContainer(element);
+  }, []);
+  const [width, setWidth] = useState(0);
 
-  const dailyServedData = useMemo(() => {
-    const dailyTotals = new Map();
-    servedEvents
-      .filter((event) => !rangeStart || new Date(event.timestamp) >= rangeStart)
-      .forEach((event) => {
-        const dateKey = getLocalDateKey(event.timestamp);
-        dailyTotals.set(dateKey, (dailyTotals.get(dateKey) ?? 0) + 1);
+  useEffect(() => {
+    if (!container) return undefined;
+
+    function updateWidth() {
+      const nextWidth = Math.round(container.getBoundingClientRect().width);
+      setWidth((currentWidth) => (currentWidth === nextWidth ? currentWidth : nextWidth));
+    }
+
+    updateWidth();
+    const observer = typeof ResizeObserver === 'undefined'
+      ? null
+      : new ResizeObserver(updateWidth);
+    observer?.observe(container);
+    window.addEventListener('resize', updateWidth);
+
+    return () => {
+      observer?.disconnect();
+      window.removeEventListener('resize', updateWidth);
+    };
+  }, [container]);
+
+  return [containerRef, width];
+}
+
+export default function Analytics({ analyticsRefreshKey }) {
+  const [data, setData] = useState(null);
+  const [status, setStatus] = useState('loading');
+  const [error, setError] = useState('');
+  const [retryKey, setRetryKey] = useState(0);
+  const [trendChartRef, trendChartWidth] = useChartWidth();
+  const [servedChartRef, servedChartWidth] = useChartWidth();
+  const [performanceChartRef, performanceChartWidth] = useChartWidth();
+
+  useEffect(() => {
+    const controller = new AbortController();
+    Promise.all([
+      fetchDashboardAnalytics(controller.signal),
+      fetchQueueTrends(controller.signal),
+      fetchQueuePerformance(controller.signal),
+      fetchRecentActivity(controller.signal),
+    ])
+      .then(([dashboard, trends, queues, activities]) => {
+        if (controller.signal.aborted) return;
+        setData({ dashboard, trends, queues, activities });
+        setStatus('loaded');
+        setError('');
+      })
+      .catch((requestError) => {
+        if (controller.signal.aborted) return;
+        setData(null);
+        setStatus('error');
+        setError(
+          getAnalyticsErrorMessage(requestError, 'Unable to load analytics. Please try again.'),
+        );
       });
-    return Array.from(dailyTotals, ([dateKey, served]) => ({
-      dateKey,
-      label: new Date(`${dateKey}T12:00:00`).toLocaleDateString(undefined, {
-        month: 'short',
-        day: 'numeric',
-      }),
-      served,
-    })).sort((a, b) => a.dateKey.localeCompare(b.dateKey));
-  }, [rangeStart, servedEvents]);
 
-  const queuePerformance = queues.map((queue) => ({
-    name: queue.name,
-    served: queue.completedCount,
-    waiting: queue.tokens.filter((token) => token.status === 'Waiting').length,
-  }));
-  const summaryStats = [
-    { id: 'people-served', label: 'People Served', value: completedTotal, unit: null },
+    return () => controller.abort();
+  }, [analyticsRefreshKey, retryKey]);
+
+  function retryAnalytics() {
+    setData(null);
+    setStatus('loading');
+    setError('');
+    setRetryKey((current) => current + 1);
+  }
+
+  const summaryStats = data ? [
     {
-      id: 'average-wait',
-      label: 'Average Wait Time',
-      value: averageWait ?? '—',
-      unit: averageWait === null ? null : 'min',
+      label: 'People Served',
+      value: data.dashboard.totalPeopleServed,
+      icon: UserCheck,
+      accent: 'bg-emerald-50 text-emerald-700',
     },
-    { id: 'current-waiting', label: 'Currently Waiting', value: waitingTokens.length, unit: null },
-    { id: 'cancelled-tokens', label: 'Cancelled Tokens', value: cancelledTotal, unit: null },
-  ];
+    {
+      label: 'Average Waiting Time',
+      value: data.dashboard.averageWaitingTimeMinutes === null
+        ? '—'
+        : data.dashboard.averageWaitingTimeMinutes.toFixed(1),
+      unit: data.dashboard.averageWaitingTimeMinutes === null ? null : 'min',
+      detail: data.dashboard.averageWaitingTimeMinutes === null ? 'Unavailable' : undefined,
+      icon: Clock3,
+      accent: 'bg-amber-50 text-amber-700',
+    },
+    {
+      label: 'Currently Waiting',
+      value: data.dashboard.totalWaitingTokens,
+      icon: Users,
+      accent: 'bg-blue-50 text-blue-700',
+    },
+    {
+      label: 'Currently Serving',
+      value: data.dashboard.currentlyServingTokens,
+      icon: Timer,
+      accent: 'bg-violet-50 text-violet-700',
+    },
+    {
+      label: 'Cancelled Tokens',
+      value: data.dashboard.totalCancelledTokens,
+      icon: Ban,
+      accent: 'bg-rose-50 text-rose-700',
+    },
+    {
+      label: 'Average Service Duration',
+      value: data.dashboard.averageServiceDurationMinutes === null
+        ? '—'
+        : data.dashboard.averageServiceDurationMinutes.toFixed(1),
+      unit: data.dashboard.averageServiceDurationMinutes === null ? null : 'min',
+      detail: data.dashboard.averageServiceDurationMinutes === null ? 'Unavailable' : undefined,
+      icon: CheckCircle,
+      accent: 'bg-indigo-50 text-indigo-700',
+    },
+  ] : [];
+
+  const queueTrendData = data?.trends.map((day) => ({
+    ...day,
+    label: formatDay(day.date),
+  })) ?? [];
+  const performanceData = data?.queues ?? [];
+  const hasTrendActivity = queueTrendData.some(
+    (day) => day.tokensCreated || day.tokensCompleted || day.tokensCancelled,
+  );
 
   return (
-    <div className="min-h-full bg-[#F8FAFC] px-5 py-6 sm:px-7 sm:py-7">
-      <div className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
-        <div>
-          <h2 className="text-[28px] font-semibold leading-tight tracking-[-0.035em] text-slate-900">
-            Analytics
-          </h2>
-          <p className="mt-1.5 max-w-2xl text-sm text-slate-500">
-            Queue activity and service performance from your current mock data.
-          </p>
+    <div
+      className="min-h-full bg-[#F8FAFC] px-5 py-6 sm:px-7 sm:py-7"
+    >
+      <div className="mb-6">
+        <h2 className="text-[28px] font-semibold leading-tight tracking-[-0.035em] text-slate-900">
+          Analytics
+        </h2>
+        <p className="mt-1.5 max-w-2xl text-sm text-slate-500">
+          Live queue activity and service performance for your workspace.
+        </p>
+      </div>
+
+      {status === 'loading' ? (
+        <div className="flex min-h-64 items-center justify-center gap-2 text-sm text-slate-500" role="status">
+          <span className="h-5 w-5 animate-spin rounded-full border-2 border-blue-600 border-t-transparent" aria-hidden="true" />
+          Loading analytics…
         </div>
-        <label className="flex items-center gap-2 self-start text-xs font-medium text-slate-600 sm:self-auto">
-          Chart date range
-          <select
-            value={dateRange}
-            onChange={(event) => setDateRange(event.target.value)}
-            className="min-h-10 rounded-lg border border-slate-200 bg-white px-3 text-xs font-semibold text-slate-700 outline-none transition-colors focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+      ) : status === 'error' ? (
+        <section className="rounded-xl border border-red-200 bg-white px-5 py-8 text-center shadow-sm">
+          <p className="text-sm text-red-700" role="alert">{error}</p>
+          <button
+            type="button"
+            onClick={retryAnalytics}
+            className="mt-4 min-h-9 rounded-lg bg-blue-600 px-3 text-xs font-semibold text-white hover:bg-blue-700"
           >
-            {rangeOptions.map((option) => (
-              <option key={option.value} value={option.value}>{option.label}</option>
+            Try again
+          </button>
+        </section>
+      ) : (
+        <>
+          <section
+            className="mb-6 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3"
+            aria-label="Analytics summary"
+          >
+            {summaryStats.map((stat) => (
+              <StatCard key={stat.label} {...stat} />
             ))}
-          </select>
-        </label>
-      </div>
+          </section>
 
-      <section
-        className="mb-6 grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4"
-        aria-label="Analytics summary"
-      >
-        {summaryStats.map((stat, index) => (
-          <StatCard
-            key={stat.id}
-            label={stat.label}
-            value={stat.value}
-            unit={stat.unit}
-            icon={statMeta[index].icon}
-            accent={statMeta[index].accent}
-          />
-        ))}
-      </section>
-
-      <p className="mb-4 text-[11px] leading-5 text-slate-500">
-        The date range applies to the activity charts. Summary and queue comparison use current
-        counts and aggregate completed totals.
-      </p>
-
-      <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
-        <ChartCard
-          title="Queue Length Trend"
-          description="Total people waiting at each recorded queue change."
-        >
-          {queueTrendData.length ? (
-            <div className="h-[280px] w-full" role="img" aria-label="Line chart of total people waiting over time">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={queueTrendData} margin={{ top: 8, right: 12, bottom: 4, left: -16 }}>
-                  <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
-                  <XAxis
-                    dataKey="label"
-                    tick={{ fill: '#64748b', fontSize: 11 }}
-                    tickLine={false}
-                    axisLine={{ stroke: '#cbd5e1' }}
-                    minTickGap={24}
-                  />
-                  <YAxis
-                    allowDecimals={false}
-                    tick={{ fill: '#64748b', fontSize: 11 }}
-                    tickLine={false}
-                    axisLine={false}
-                  />
-                  <Tooltip
-                    contentStyle={chartTooltipStyle}
-                    formatter={(value) => [`${value} people`, 'Waiting']}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="waiting"
-                    name="People waiting"
-                    stroke="#2563eb"
-                    strokeWidth={2.5}
-                    dot={{ r: 3, fill: '#2563eb', strokeWidth: 0 }}
-                    activeDot={{ r: 5 }}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          ) : (
-            <EmptyChart>No queue-length snapshots are available for this date range.</EmptyChart>
-          )}
-          <p className="mt-2 text-[10px] leading-4 text-slate-400">
-            New points are recorded when people are added, called, or cancelled. History is session-only.
+          <p className="mb-4 text-[11px] leading-5 text-slate-500">
+            Activity charts show the seven most recent UTC days. Queue performance and summary cards
+            show current and all-time backend metrics.
           </p>
-        </ChartCard>
 
-        <ChartCard
-          title="Daily Served Tokens"
-          description="Completed tokens recorded by day in this app session."
-        >
-          {dailyServedData.length ? (
-            <div className="h-[280px] w-full" role="img" aria-label="Bar chart of completed tokens by day">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={dailyServedData} margin={{ top: 8, right: 12, bottom: 4, left: -16 }}>
-                  <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
-                  <XAxis
-                    dataKey="label"
-                    tick={{ fill: '#64748b', fontSize: 11 }}
-                    tickLine={false}
-                    axisLine={{ stroke: '#cbd5e1' }}
-                  />
-                  <YAxis
-                    allowDecimals={false}
-                    tick={{ fill: '#64748b', fontSize: 11 }}
-                    tickLine={false}
-                    axisLine={false}
-                  />
-                  <Tooltip
-                    contentStyle={chartTooltipStyle}
-                    formatter={(value) => [value, 'Tokens served']}
-                  />
-                  <Bar dataKey="served" name="Tokens served" fill="#16a34a" radius={[5, 5, 0, 0]} maxBarSize={48} />
-                </BarChart>
-              </ResponsiveContainer>
-            </div>
-          ) : (
-            <EmptyChart>
-              No completions have been recorded in this date range during the current session.
-              Complete a serving token to start this chart.
-            </EmptyChart>
-          )}
-          <p className="mt-2 text-[10px] leading-4 text-slate-400">
-            Existing completed totals do not include dates in the sample data.
-          </p>
-        </ChartCard>
-
-        <ChartCard
-          title="Queue-wise Performance"
-          description="Aggregate completed tokens compared with the current waiting count."
-          className="xl:col-span-2"
-        >
-          {queuePerformance.length ? (
-            <div
-              className="w-full"
-              style={{ height: Math.max(280, queuePerformance.length * 64) }}
-              role="img"
-              aria-label="Bar chart comparing completed and waiting tokens by queue"
+          <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+            <ChartCard
+              title="Queue Activity Trends"
+              description="Daily token creation, completion, and cancellation for the last seven days."
             >
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart
-                  data={queuePerformance}
-                  layout="vertical"
-                  margin={{ top: 8, right: 20, bottom: 8, left: 8 }}
-                  barCategoryGap="28%"
+              {queueTrendData.length ? (
+                <>
+                  <div
+                    ref={trendChartRef}
+                    className="h-[280px] w-full min-w-0"
+                    role="img"
+                    aria-label="Line chart of daily token activity for the last seven days"
+                  >
+                    {trendChartWidth > 0 && (
+                      <LineChart
+                        width={trendChartWidth}
+                        height={280}
+                        data={queueTrendData}
+                        margin={{ top: 8, right: 12, bottom: 4, left: -16 }}
+                      >
+                        <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
+                        <XAxis
+                          dataKey="label"
+                          tick={{ fill: '#64748b', fontSize: 11 }}
+                          tickLine={false}
+                          axisLine={{ stroke: '#cbd5e1' }}
+                          minTickGap={18}
+                        />
+                        <YAxis
+                          allowDecimals={false}
+                          tick={{ fill: '#64748b', fontSize: 11 }}
+                          tickLine={false}
+                          axisLine={false}
+                        />
+                        <Tooltip
+                          contentStyle={chartTooltipStyle}
+                          labelFormatter={(label) => `Date: ${label}`}
+                          formatter={(value, name) => [value, name]}
+                        />
+                        <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '8px' }} />
+                        <Line
+                          type="monotone"
+                          dataKey="tokensCreated"
+                          name="Tokens created"
+                          stroke="#2563eb"
+                          strokeWidth={2.5}
+                          dot={{ r: 3, fill: '#2563eb', strokeWidth: 0 }}
+                          activeDot={{ r: 5 }}
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="tokensCompleted"
+                          name="Tokens completed"
+                          stroke="#16a34a"
+                          strokeWidth={2.5}
+                          dot={{ r: 3, fill: '#16a34a', strokeWidth: 0 }}
+                          activeDot={{ r: 5 }}
+                        />
+                        <Line
+                          type="monotone"
+                          dataKey="tokensCancelled"
+                          name="Tokens cancelled"
+                          stroke="#e11d48"
+                          strokeWidth={2.5}
+                          dot={{ r: 3, fill: '#e11d48', strokeWidth: 0 }}
+                          activeDot={{ r: 5 }}
+                        />
+                      </LineChart>
+                    )}
+                  </div>
+                  {!hasTrendActivity && (
+                    <p className="mt-2 text-center text-[11px] text-slate-500">
+                      No token activity was recorded in these seven days.
+                    </p>
+                  )}
+                </>
+              ) : (
+                <EmptyChart>No seven-day trend data is available.</EmptyChart>
+              )}
+            </ChartCard>
+
+            <ChartCard
+              title="Daily Served Tokens"
+              description="Tokens completed on each of the last seven days."
+            >
+              {queueTrendData.length ? (
+                <>
+                  <div
+                    ref={servedChartRef}
+                    className="h-[280px] w-full min-w-0"
+                    role="img"
+                    aria-label="Bar chart of completed tokens by day over the last seven days"
+                  >
+                    {servedChartWidth > 0 && (
+                      <BarChart
+                        width={servedChartWidth}
+                        height={280}
+                        data={queueTrendData}
+                        margin={{ top: 8, right: 12, bottom: 4, left: -16 }}
+                      >
+                        <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
+                        <XAxis
+                          dataKey="label"
+                          tick={{ fill: '#64748b', fontSize: 11 }}
+                          tickLine={false}
+                          axisLine={{ stroke: '#cbd5e1' }}
+                        />
+                        <YAxis
+                          allowDecimals={false}
+                          tick={{ fill: '#64748b', fontSize: 11 }}
+                          tickLine={false}
+                          axisLine={false}
+                        />
+                        <Tooltip
+                          contentStyle={chartTooltipStyle}
+                          labelFormatter={(label) => `Date: ${label}`}
+                          formatter={(value) => [value, 'Tokens completed']}
+                        />
+                        <Bar
+                          dataKey="tokensCompleted"
+                          name="Tokens completed"
+                          fill="#16a34a"
+                          radius={[5, 5, 0, 0]}
+                          maxBarSize={48}
+                        />
+                      </BarChart>
+                    )}
+                  </div>
+                  {!queueTrendData.some((day) => day.tokensCompleted > 0) && (
+                    <p className="mt-2 text-center text-[11px] text-slate-500">
+                      No tokens were completed in these seven days.
+                    </p>
+                  )}
+                </>
+              ) : (
+                <EmptyChart>No seven-day completion data is available.</EmptyChart>
+              )}
+            </ChartCard>
+
+            <ChartCard
+              title="Queue-wise Performance"
+              description="Completed tokens compared with the current waiting count."
+              className="xl:col-span-2"
+            >
+              {performanceData.length ? (
+                <div
+                  ref={performanceChartRef}
+                  className="w-full min-w-0"
+                  style={{ height: Math.max(280, performanceData.length * 64) }}
+                  role="img"
+                  aria-label="Bar chart comparing completed and waiting tokens by queue"
                 >
-                  <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" horizontal={false} />
-                  <XAxis
-                    type="number"
-                    allowDecimals={false}
-                    tick={{ fill: '#64748b', fontSize: 11 }}
-                    tickLine={false}
-                    axisLine={{ stroke: '#cbd5e1' }}
-                  />
-                  <YAxis
-                    type="category"
-                    dataKey="name"
-                    width={150}
-                    tick={{ fill: '#475569', fontSize: 11 }}
-                    tickLine={false}
-                    axisLine={false}
-                  />
-                  <Tooltip contentStyle={chartTooltipStyle} />
-                  <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '8px' }} />
-                  <Bar dataKey="served" name="Completed (all time)" fill="#7c3aed" radius={[0, 4, 4, 0]} />
-                  <Bar dataKey="waiting" name="Waiting now" fill="#2563eb" radius={[0, 4, 4, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
+                  {performanceChartWidth > 0 && (
+                    <BarChart
+                      width={performanceChartWidth}
+                      height={Math.max(280, performanceData.length * 64)}
+                      data={performanceData}
+                      layout="vertical"
+                      margin={{ top: 8, right: 20, bottom: 8, left: 8 }}
+                      barCategoryGap="28%"
+                    >
+                      <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" horizontal={false} />
+                      <XAxis
+                        type="number"
+                        allowDecimals={false}
+                        tick={{ fill: '#64748b', fontSize: 11 }}
+                        tickLine={false}
+                        axisLine={{ stroke: '#cbd5e1' }}
+                      />
+                      <YAxis
+                        type="category"
+                        dataKey="name"
+                        width={150}
+                        tick={{ fill: '#475569', fontSize: 11 }}
+                        tickLine={false}
+                        axisLine={false}
+                      />
+                      <Tooltip contentStyle={chartTooltipStyle} />
+                      <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '8px' }} />
+                      <Bar dataKey="completedCount" name="Completed" fill="#7c3aed" radius={[0, 4, 4, 0]} />
+                      <Bar dataKey="waitingCount" name="Waiting now" fill="#2563eb" radius={[0, 4, 4, 0]} />
+                    </BarChart>
+                  )}
+                </div>
+              ) : (
+                <EmptyChart>Create a queue to see its performance here.</EmptyChart>
+              )}
+            </ChartCard>
+
+            <ChartCard
+              title="Queue Performance Details"
+              description="Current token counts and average durations for each queue."
+              className="xl:col-span-2"
+            >
+              {performanceData.length ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[860px] text-left">
+                    <thead className="border-b border-slate-200 bg-slate-50/80">
+                      <tr className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">
+                        <th className="px-3 py-3">Queue</th>
+                        <th className="px-3 py-3">Queue ID</th>
+                        <th className="px-3 py-3">Total</th>
+                        <th className="px-3 py-3">Waiting</th>
+                        <th className="px-3 py-3">Serving</th>
+                        <th className="px-3 py-3">Completed</th>
+                        <th className="px-3 py-3">Cancelled</th>
+                        <th className="px-3 py-3">Avg. Wait</th>
+                        <th className="px-3 py-3">Avg. Service</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 text-xs text-slate-700">
+                      {performanceData.map((queue) => (
+                        <tr key={queue.queueId}>
+                          <td className="px-3 py-3 font-medium text-slate-900">{queue.name}</td>
+                          <td className="px-3 py-3 font-mono text-slate-500">{queue.queueId}</td>
+                          <td className="px-3 py-3">{queue.totalTokens}</td>
+                          <td className="px-3 py-3">{queue.waitingCount}</td>
+                          <td className="px-3 py-3">{queue.servingCount}</td>
+                          <td className="px-3 py-3">{queue.completedCount}</td>
+                          <td className="px-3 py-3">{queue.cancelledCount}</td>
+                          <td className="px-3 py-3">{formatDuration(queue.averageWaitingTimeMinutes)}</td>
+                          <td className="px-3 py-3">{formatDuration(queue.averageServiceDurationMinutes)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="py-8 text-center text-xs text-slate-500">No queue performance data yet. Create a queue to get started.</p>
+              )}
+            </ChartCard>
+
+            <div className="xl:col-span-2">
+              <RecentActivity activities={data.activities} />
             </div>
-          ) : (
-            <EmptyChart>Create a queue to see its performance here.</EmptyChart>
-          )}
-        </ChartCard>
-      </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }
